@@ -116,11 +116,10 @@ Read this top to bottom. **Do not skip Part 1** — ModemManager on the host is 
 | **Part 1** | Everyone | Install **ModemManager on the host**, plug modems, verify `mmcli` |
 | **Part 2** | Everyone | Create **Telegram** bot token and chat ID |
 | **Part 3** | Everyone | Create **config files** in the project directory |
-| **Part 4A** *or* **4B** | Pick **one** | **4A** = run smspi in **Docker** · **4B** = run smspi in **Python venv** |
-| **Part 5** | venv only (recommended on Pi) | **Autostart** with systemd + prove ModemManager starts first |
-| **Part 6** | Everyone | **Smoke test** + send a real SMS |
+| **Part 4A** *or* **4B** | Pick **one** | **4A** = Docker · **4B** = Python venv **+ systemd autostart** (all venv steps in one part) |
+| **Part 5** | Everyone | **Smoke test** + send a real SMS |
 
-There is **no** separate “quick start” that replaces these parts. “Quick start” = do Part 1 → 2 → 3 → (4A or 4B) → 6.
+There is **no** separate “quick start” that replaces these parts. Full path: Part 1 → 2 → 3 → (4A **or** 4B) → 5.
 
 ### Before you begin (hardware & accounts)
 
@@ -336,13 +335,15 @@ chmod +x scripts/verify-boot-order.sh
 
 smspi inside Docker **waits up to 180 seconds** for ModemManager on startup; you do not install `smspi.service` for Docker.
 
-**Continue with [Part 6](#part-6--verify-everyone)**
+**Continue with [Part 5](#part-5--verify-everyone)**
 
 ---
 
 ### Part 4B — Run with Python venv (only if you chose venv)
 
 Skip this entire section if you chose **Part 4A (Docker)**.
+
+Complete **all** steps 4B.1–4B.5 in order. Do not skip 4B.4–4B.5 on a Pi you want to run 24/7 (that is how smspi starts after reboot, **after** ModemManager).
 
 #### Step 4B.1 — Create virtualenv and install dependencies
 
@@ -363,25 +364,18 @@ export PYTHONPATH="$PWD/src"
 python -m smspi
 ```
 
-Expected: same log messages as Docker. Leave it running, or stop with `Ctrl+C` after you see `Bootstrap complete`.
+Expected: `ModemManager is reachable`, `Bootstrap complete`, `All worker threads started`.  
+Stop with `Ctrl+C` after you see that (systemd will run it in the background next).
 
-For a **background** run on a server, use Part 5 (systemd) — do not guess process managers.
+If this step fails, **do not** continue — fix Part 1 (`mmcli -L`) first.
 
-**If this works, continue with Part 5 for autostart, then Part 6.**
-
----
-
-### Part 5 — Autostart with systemd (venv only, strongly recommended)
-
-Skip if you use **Docker** (Part 4A).
+#### Step 4B.3 — Install systemd service (autostart at boot)
 
 This installs `smspi.service` so that:
 
 - **ModemManager is required** (`Requires=ModemManager.service`)
 - smspi starts **after** ModemManager (`After=ModemManager.service`)
 - smspi **does not start** if ModemManager is down (`ExecStartPre` check)
-
-#### Step 5.1 — Install the service (from your clone directory)
 
 ```bash
 cd ~/smspi
@@ -395,7 +389,7 @@ The script will:
 3. `systemctl enable smspi`  
 4. `systemctl start smspi`  
 
-#### Step 5.2 — Verify boot order (copy/paste)
+#### Step 4B.4 — Verify ModemManager starts before smspi
 
 ```bash
 chmod +x scripts/verify-boot-order.sh
@@ -420,7 +414,7 @@ sudo systemctl status smspi
 
 Both should be `active (running)`.
 
-#### Step 5.3 — After reboot test (optional but recommended)
+#### Step 4B.5 — Reboot test (recommended)
 
 ```bash
 sudo reboot
@@ -434,13 +428,15 @@ systemctl is-active smspi
 mmcli -L
 ```
 
-**Continue with Part 6.**
+Expected: both `active`, `mmcli -L` lists your modem(s).
+
+**Continue with [Part 5](#part-5--verify-everyone)**
 
 ---
 
-### Part 6 — Verify (everyone)
+### Part 5 — Verify (everyone)
 
-#### Step 6.1 — Smoke test
+#### Step 5.1 — Smoke test
 
 ```bash
 cd ~/smspi
@@ -450,7 +446,7 @@ chmod +x scripts/smoke-test.sh
 
 Fix every `[FAIL]` before relying on production SMS.
 
-#### Step 6.2 — End-to-end SMS test
+#### Step 5.2 — End-to-end SMS test
 
 1. From another phone, send an SMS to the SIM’s mobile number  
 2. Check Telegram for the formatted message  
@@ -463,7 +459,7 @@ sqlite3 ~/smspi/data/smspi.db \
 
 Expected: `telegram_status` = `sent`
 
-#### Step 6.3 — Logs
+#### Step 5.3 — Logs
 
 Docker:
 
@@ -559,7 +555,7 @@ SMSPI_LOG_LEVEL=INFO
 
 ## Testing
 
-Deployment verification is **[Part 6](#part-6--verify-everyone)**. Extra checks:
+Deployment verification is **[Part 5](#part-5--verify-everyone)**. Extra checks:
 
 ### ModemManager manual
 
@@ -608,7 +604,7 @@ docker compose logs -f smspi
 
 - On boot, smspi waits up to **180 s** for ModemManager, runs full discovery, scans SMS, re-queues failed Telegram sends (batch limit configurable).
 - SQLite uses **WAL**; committed rows survive abrupt power-off in normal cases.
-- **Action:** follow [Part 1](#part-1--host-install-modemmanager-required) and [Part 6](#part-6--verify-everyone); Docker: `docker compose up -d` · venv: `sudo systemctl start smspi`
+- **Action:** follow [Part 1](#part-1--host-install-modemmanager-required) and [Part 5](#part-5--verify-everyone); Docker: `docker compose up -d` · venv: `sudo systemctl start smspi`
 
 ### Reboot / USB port changed
 

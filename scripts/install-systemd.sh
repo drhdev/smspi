@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install smspi as a systemd service (venv deployment only — not for Docker).
-# Run from the project directory on the Pi, after Part 1–3 of the README deployment guide.
+# Install smspi as a systemd service (README Part 4B step 4B.3 — venv only, not Docker).
+# Run from the project directory on the Pi, after Part 1–3 and 4B.1–4B.2.
 #
 # Usage:
 #   cd /home/pi/smspi
@@ -25,13 +25,13 @@ fi
 
 if [ ! -x "$VENV_PYTHON" ]; then
   echo "venv not found at $VENV_PYTHON" >&2
-  echo "Complete venv setup first (README Part 4B steps 1–5)." >&2
+  echo "Complete venv setup first (README Part 4B steps 4B.1–4B.2)." >&2
   exit 1
 fi
 
 if [ ! -f "$INSTALL_DIR/config/config.yaml" ]; then
   echo "Missing $INSTALL_DIR/config/config.yaml" >&2
-  echo "Complete config setup first (README Part 3)." >&2
+  echo "Complete config setup first (README Part 3), then Part 4B.1–4B.2." >&2
   exit 1
 fi
 
