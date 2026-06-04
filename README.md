@@ -683,6 +683,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
-Copyright (C) 2026 drhdev and contributors.
-
-This program is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3** (or later). See [LICENSE](LICENSE) and [https://www.gnu.org/licenses/gpl-3.0.html](https://www.gnu.org/licenses/gpl-3.0.html).
+This project is licensed under the **GNU General Public License v3** (or later). See [LICENSE](LICENSE) and [https://www.gnu.org/licenses/gpl-3.0.html](https://www.gnu.org/licenses/gpl-3.0.html).
