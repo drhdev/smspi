@@ -1,16 +1,22 @@
 [Unit]
 Description=smspi SMS to Telegram gateway
-After=network-online.target ModemManager.service
-Wants=ModemManager.service
+Documentation=https://github.com/drhdev/smspi
+# smspi must start AFTER ModemManager (host). Do not start smspi without MM.
+After=dbus.service network-online.target ModemManager.service
+Wants=network-online.target
+Requires=ModemManager.service
 
 [Service]
 Type=simple
+# CHANGE THIS: set to the directory where you cloned smspi (see scripts/install-systemd.sh)
 WorkingDirectory=/opt/smspi
 Environment=SMSPI_CONFIG=/opt/smspi/config/config.yaml
 Environment=PYTHONPATH=/opt/smspi/src
+# Fail fast if ModemManager is not running (clear error in journalctl)
+ExecStartPre=/usr/bin/systemctl is-active --quiet ModemManager.service
 ExecStart=/opt/smspi/.venv/bin/python -m smspi
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

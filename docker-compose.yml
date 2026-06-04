@@ -1,3 +1,6 @@
+# DEPLOYMENT: ModemManager must be installed on the HOST first (README Part 1).
+# This file only runs the Python app; it does not install ModemManager.
+# Boot order: ModemManager.service -> docker.service -> this container.
 services:
   smspi:
     build: .

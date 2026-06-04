@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Run on Raspberry Pi OS (as root or with sudo) before first Docker start.
+# PART 1 of deployment (README): install ModemManager on the HOST.
+# Required for BOTH Docker and venv. Run once on the Pi:
+#   cd ~/smspi
+#   sudo bash scripts/setup-host.sh
 set -euo pipefail
 
 echo "==> Installing host packages for Huawei USB modems + ModemManager"
@@ -29,8 +32,10 @@ if [ -f "$(dirname "$0")/99-huawei-modem.rules" ]; then
   udevadm trigger
 fi
 
-echo "==> Plug in Huawei sticks, then check:"
-echo "    mmcli -L"
-echo "    mmcli -m 0"
 echo ""
-echo "Host setup done. Configure config/config.yaml and run: docker compose up -d --build"
+echo "==> VERIFY (copy/paste each command; all must succeed before starting smspi):"
+echo "    systemctl is-active ModemManager    # must print: active"
+echo "    mmcli -L                            # must list /org/.../Modem/N when stick is plugged in"
+echo "    mmcli -m 0                          # must show modem details (use -m 1 if 0 fails)"
+echo ""
+echo "Host setup done. Next: README Part 2 (Telegram), Part 3 (config), then Part 4A Docker OR 4B venv."
