@@ -1,143 +1,170 @@
 # smspi
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi%20OS%20%7C%20Debian-red.svg)]()
 
-**smspi** is a lightweight SMS gateway for Raspberry Pi (and similar Linux hosts). It receives text messages from one or more USB cellular modems, stores them in SQLite, and forwards them to a Telegram chat via the Bot API.
+Multi-modem SMS gateway for Raspberry Pi. Receives SMS from USB cellular modems, stores them in SQLite, and forwards them to Telegram.
 
-Designed for **24/7 operation**: power loss, reboots, USB port changes, and temporary Telegram or modem outages are handled with retries, deduplication, and health checks.
-
-Repository: [https://github.com/drhdev/smspi](https://github.com/drhdev/smspi)
+**Repository:** [github.com/drhdev/smspi](https://github.com/drhdev/smspi)
 
 ---
 
 ## Table of contents
 
-- [What it does](#what-it-does)
-- [Components](#components)
-- [Supported hardware](#supported-hardware)
-- [Deployment guide (step by step)](#deployment-guide-step-by-step)
-- [Configuration reference](#configuration-reference)
-- [Testing](#testing)
-- [Operations](#operations)
-- [FAQ & troubleshooting](#faq--troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Requirements](#requirements)
+4. [Installation](#installation)
+   - [Roadmap](#roadmap)
+   - [Part 1 — Host & ModemManager](#part-1--host--modemmanager)
+   - [Part 2 — Telegram](#part-2--telegram)
+   - [Part 3 — Configuration](#part-3--configuration)
+   - [Part 4A — Docker](#part-4a--docker)
+   - [Part 4B — Python venv & systemd](#part-4b--python-venv--systemd)
+   - [Part 5 — Verification](#part-5--verification)
+5. [Configuration reference](#configuration-reference)
+6. [Project layout & scripts](#project-layout--scripts)
+7. [Day-to-day operations](#day-to-day-operations)
+8. [Troubleshooting](#troubleshooting)
+9. [Contributing](#contributing)
+10. [License](#license)
 
 ---
 
-## What it does
+## Overview
 
-1. **Discovers** USB modems via [ModemManager](https://www.freedesktop.org/wiki/Software/ModemManager/) on the **host** (not inside Docker).
-2. **Identifies** each modem by **IMEI** (fallback: ICCID) so `/Modem/0` vs `/Modem/1` swaps after reboot do not break mapping.
-3. **Polls** new incoming SMS, stores them in **SQLite** (sender, optional name, body, local time, SIM receiving number).
-4. **Forwards** each message to **Telegram** with HTML formatting, rate-limit handling, and retries.
-5. **Deletes** SMS from modem storage after successful DB insert (configurable) to avoid a full SIM inbox.
-6. **Runs health checks** and writes `data/.health_ok` for Docker `HEALTHCHECK`.
+smspi is built for **unattended 24/7 use** on a Raspberry Pi:
+
+| Capability | Description |
+|------------|-------------|
+| Multi-modem | Several USB sticks; stable mapping by **IMEI** (not `/Modem/0`) |
+| Resilience | Survives reboot, power loss, USB reordering, Telegram outages |
+| Storage | SQLite (WAL) with deduplication by modem SMS path |
+| Notifications | Telegram Bot API with HTML messages and rate-limit handling |
+| Health | Periodic self-checks + Docker `HEALTHCHECK` stamp file |
+
+**Runtime rule:** [ModemManager](https://www.freedesktop.org/wiki/Software/ModemManager/) always runs on the **host**. Docker (if used) only runs the Python application and talks to the host via D-Bus.
+
+---
+
+## Architecture
 
 ```mermaid
-flowchart LR
-  USB[USB cellular modems] --> MM[ModemManager on host]
-  MM --> DBus[D-Bus]
-  DBus --> Poll[SMS poller]
-  DBus --> Disc[Discovery]
-  Poll --> DB[(SQLite)]
-  DB --> TG[Telegram worker]
-  Health[Health] --> DB
-  Health --> MM
+flowchart TB
+  subgraph host["Raspberry Pi host"]
+    USB[USB modems]
+    MM[ModemManager]
+    USB --> MM
+    MM --> DBus[D-Bus]
+  end
+
+  subgraph app["smspi application"]
+    Disc[Discovery thread]
+    Poll[SMS poller]
+    TG[Telegram worker]
+    HC[Health]
+    DB[(SQLite)]
+    Poll --> DB
+    DB --> TG
+    HC --> DB
+  end
+
+  DBus --> Disc
+  DBus --> Poll
+  MM --> HC
+  TG --> Telegram[Telegram API]
 ```
 
----
+### Stack
 
-## Components
+| Layer | Components |
+|-------|------------|
+| Host | Raspberry Pi OS / Debian, `udev`, `usb_modeswitch` |
+| Modems | ModemManager, `mmcli`, Huawei `12d1:*` (primary target) |
+| Application | Python 3.11+, threaded orchestrator |
+| Persistence | SQLite (`sms_messages`, `modem_registry`, `health_checks`) |
+| Alerts | Telegram `sendMessage` |
+| Deploy | **Docker Compose** *or* **venv + systemd** |
 
-| Layer | Technology | Role |
-|-------|------------|------|
-| **Host OS** | Raspberry Pi OS / Debian | USB, udev, power, networking |
-| **Modem stack** | ModemManager + `mmcli` | Modem mode, registration, SMS read/delete |
-| **USB mode** | `usb_modeswitch` | Huawei sticks: leave HiLink / mass-storage → modem mode |
-| **Application** | Python 3.11+ | Orchestrator, threads, config, logging |
-| **Storage** | SQLite (WAL) | Messages, modem registry, health history |
-| **Notifications** | Telegram Bot API | `sendMessage` to your chat |
-| **Container (optional)** | Docker Compose | App + host D-Bus mount; MM stays on host |
-| **Process manager (optional)** | systemd unit | Native venv deployment |
+### Worker threads
 
-Worker threads (loosely coupled, configurable delays):
-
-| Thread | Interval (default) | Task |
-|--------|-------------------|------|
-| SMS poller | 12 s | Light modem refresh, read SMS → DB |
-| Discovery | 45 s | Full discover + enable modems |
-| Telegram | 2 s+ | Send `pending`, retry `failed` periodically |
-| Health | 300 s | mmcli, modem count, stale detection, stamp file |
+| Thread | Default interval | Role |
+|--------|------------------|------|
+| SMS poller | 12 s | Refresh modems, read SMS → DB |
+| Discovery | 45 s | Discover, enable modems, update registry |
+| Telegram | ≥ 2 s | Send `pending`, retry `failed` |
+| Health | 300 s | Self-check, write `data/.health_ok` |
 
 ---
 
-## Supported hardware
+## Requirements
 
-### Modems
+### Hardware
 
-smspi talks to modems through **ModemManager**, not raw AT commands. Any stick that MM exposes as an SMS-capable modem should work. The project is **tested and documented around Huawei USB 3G/LTE dongles** (vendor `12d1`), commonly used on Pi gateways in EU (e.g. Telekom DE).
+- Raspberry Pi 3 / 4 / 5 (or Linux PC with USB)
+- USB cellular modem(s); **Huawei** `12d1:*` documented (see `scripts/99-huawei-modem.rules`)
+- **Powered USB hub** when using more than one stick
+- nano-SIM per modem with **SMS enabled**; **PIN disabled** for unattended use
 
-**Examples** (product IDs vary; check `lsusb`):
+### Software
 
-| Vendor:Product | Notes |
-|----------------|--------|
-| `12d1:1f01`, `12d1:14dc`, `12d1:1506`, `12d1:155e`, `12d1:157d`, `12d1:1001` | Typical Huawei modem-mode IDs after `usb_modeswitch` |
-| Other `12d1:*` | Often supported after modeswitch; add udev rule if needed |
+| Component | Docker path | venv path |
+|-----------|-------------|-----------|
+| ModemManager on host | Required | Required |
+| `mmcli` | Required | Required |
+| Docker + Compose | Required | — |
+| Python 3.11+ venv | — | Required |
+| Telegram bot token + chat ID | Required | Required |
 
-See `scripts/99-huawei-modem.rules` for sample udev triggers.
+### Supported modems & 2G
 
-### 2G SMS on older 3G sticks
+Any modem **ModemManager** exposes for SMS should work. Tested with Huawei USB 3G/LTE dongles after `usb_modeswitch`.
 
-Many **3G-only Huawei sticks** still register on **2G (GSM)** where operators keep 2G for SMS/voice. smspi does not implement radio mode selection itself; **ModemManager** and the SIM/operator decide the access technology. If the stick registers (even on 2G) and `mmcli -m N --messaging-list-sms` shows messages, smspi will process them.
+| `lsusb` ID (examples) | Notes |
+|------------------------|--------|
+| `12d1:155e`, `12d1:1506`, `12d1:14dc`, `12d1:1f01`, … | Common modem-mode IDs |
 
-Practical notes:
-
-- Weak 2G coverage → delayed delivery; increase `mmcli_timeout_seconds` if needed.
-- Some operators sunset 2G; you may need a newer LTE stick or different SIM.
-- PIN disabled or entered once via MM is strongly recommended for unattended operation.
-
-### Host
-
-- **Raspberry Pi 3/4/5** (or any Linux box with USB + ModemManager)
-- **Powered USB hub** recommended for **multiple** dongles (under-voltage causes disconnects)
-- One or more **nano-SIM** lines with SMS capability (not data-only M2M unless SMS is enabled)
+Older **3G sticks** often still receive SMS on **2G (GSM)** where the operator keeps 2G. smspi does not pick the radio mode; if `mmcli -m N` shows `registered` and SMS list works, forwarding works.
 
 ---
 
-## Deployment guide (step by step)
+## Installation
 
-Read this top to bottom. **Do not skip Part 1** — ModemManager on the host is required for **both** Docker and venv.
+Follow the parts **in order**. Do not skip Part 1.
 
-### How the guide is structured
+Default paths use `~/smspi` and user `pi` — adjust if needed.
 
-| Part | Who must do it | What |
-|------|----------------|------|
-| **Part 1** | Everyone | Install **ModemManager on the host**, plug modems, verify `mmcli` |
-| **Part 2** | Everyone | Create **Telegram** bot token and chat ID |
-| **Part 3** | Everyone | Create **config files** in the project directory |
-| **Part 4A** *or* **4B** | Pick **one** | **4A** = Docker · **4B** = Python venv **+ systemd autostart** (all venv steps in one part) |
-| **Part 5** | Everyone | **Smoke test** + send a real SMS |
+### Roadmap
 
-There is **no** separate “quick start” that replaces these parts. Full path: Part 1 → 2 → 3 → (4A **or** 4B) → 5.
+```text
+Part 1  Host + ModemManager     →  everyone, always first
+Part 2  Telegram bot            →  everyone
+Part 3  config.yaml + .env      →  everyone
+         ┌──────────────────────┴──────────────────────┐
+Part 4A  Docker              Part 4B  venv + systemd   →  pick ONE
+         └──────────────────────┬──────────────────────┘
+Part 5  smoke test + test SMS   →  everyone
+```
 
-### Before you begin (hardware & accounts)
+| Part | Audience | Summary |
+|:----:|----------|---------|
+| **1** | All | Clone repo, `setup-host.sh`, verify `mmcli` |
+| **2** | All | BotFather token + chat ID |
+| **3** | All | `config/config.yaml`, `.env` |
+| **4A** | Docker | `docker compose up` |
+| **4B** | venv | venv → test run → `install-systemd.sh` → reboot test |
+| **5** | All | `smoke-test.sh`, send SMS, check logs |
 
-- [ ] Raspberry Pi with **Raspberry Pi OS** (or Debian), network (Ethernet/Wi‑Fi)
-- [ ] USB cellular modem(s) plugged in (powered USB hub if more than one)
-- [ ] SIM card(s) inserted; **PIN disabled** on the SIM (operator app or manual)
-- [ ] Telegram account; you will create a **bot** in Part 2
-- [ ] You decided: **Part 4A (Docker)** or **Part 4B (venv)** — write it down now
-
-**Important:** ModemManager always runs on the **Raspberry Pi host**, never inside the smspi app alone. Docker only runs the Python app; it still uses the host’s ModemManager via D-Bus.
+> **Choose one runtime before Part 4:** Docker (4A) **or** venv (4B), not both.
 
 ---
 
-### Part 1 — Host: install ModemManager (required)
+### Part 1 — Host & ModemManager
 
-Do this **on the Pi**, **before** Docker or venv. Default project path below: `/home/pi/smspi` — change if you use another user/path.
+**Goal:** ModemManager installed, enabled at boot, modems visible to `mmcli`.
 
-#### Step 1.1 — Clone the project
+#### 1.1 Clone repository
 
 ```bash
 cd ~
@@ -145,134 +172,73 @@ git clone git@github.com:drhdev/smspi.git
 cd ~/smspi
 ```
 
-If `git` is missing: `sudo apt-get update && sudo apt-get install -y git`
-
-#### Step 1.2 — Run the host setup script (installs ModemManager)
-
-This installs `modemmanager`, `usb-modeswitch`, `udev`, enables Huawei modem mode, and **enables ModemManager at boot**:
+#### 1.2 Install host packages
 
 ```bash
 cd ~/smspi
 sudo bash scripts/setup-host.sh
 ```
 
-**What this script does (you do not need to run these separately if the script succeeded):**
+Installs `modemmanager`, `usb-modeswitch`, `udev`, sets `HuaweiAltModeGlobal=1`, runs `systemctl enable --now ModemManager`.
 
-```bash
-sudo apt-get update
-sudo apt-get install -y modemmanager usb-modeswitch usb-modeswitch-data udev
-# sets HuaweiAltModeGlobal=1 in /etc/usb_modeswitch.conf
-sudo systemctl enable --now ModemManager
-```
+#### 1.3 Verify (all must pass)
 
-#### Step 1.3 — Verify ModemManager is running
+| Command | Expected |
+|---------|----------|
+| `systemctl is-active ModemManager` | `active` |
+| `which mmcli` | path, e.g. `/usr/bin/mmcli` |
+| `mmcli -L` | line with `/Modem/0` (after stick plugged in) |
+| `mmcli -m 0` | details; `state: registered` (wait 1–2 min) |
 
-Run each command. **Expected** output is shown.
+If `-m 0` fails but `-L` shows `/Modem/1`, use `mmcli -m 1`.
 
-```bash
-systemctl is-active ModemManager
-```
-
-Expected: `active`  
-If not:
-
-```bash
-sudo systemctl enable --now ModemManager
-sudo systemctl status ModemManager
-```
-
-```bash
-which mmcli
-```
-
-Expected: a path, e.g. `/usr/bin/mmcli`
-
-```bash
-mmcli -L
-```
-
-Expected: at least one line containing `/org/freedesktop/ModemManager1/Modem/0` **after** the USB stick is plugged in.  
-If the list is empty: unplug/replug the stick, wait 30 seconds, run again. Check `lsusb` for `12d1:` (Huawei).
-
-```bash
-mmcli -m 0
-```
-
-Expected: modem details; `state:` should become `registered` (may take 1–2 minutes).  
-If `-m 0` fails but `-L` shows `/Modem/1`, use `mmcli -m 1` instead.
-
-**Stop here until all checks pass.** Do not start smspi without a working `mmcli -L`.
+**Stop if verification fails** — do not continue to Part 4.
 
 ---
 
-### Part 2 — Telegram bot (required before start)
+### Part 2 — Telegram
 
-#### Step 2.1 — Create a bot and get the token
+#### 2.1 Bot token
 
-1. In Telegram, open [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`, follow prompts
-3. Copy the **HTTP API token** (looks like `123456789:AAH...`)
+1. Open [@BotFather](https://t.me/BotFather) → `/newbot`
+2. Copy the API token (`123456789:AAH…`)
 
-#### Step 2.2 — Get your chat ID
+#### 2.2 Chat ID
 
-1. Send **any message** to your new bot (or add the bot to a group and send a message there)
-2. On the Pi (replace `TOKEN`):
+1. Send a message to the bot (or post in a group with the bot).
+2. On the Pi:
 
 ```bash
-curl -s "https://api.telegram.org/botTOKEN/getUpdates"
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates"
 ```
 
-3. Find `"chat":{"id":` — that number is your **chat_id** (groups often start with `-100`)
-
-You will paste token and chat_id into `.env` in Part 3.
+3. Use `"chat":{"id": …}` as `SMSPI_TELEGRAM_CHAT_ID` (groups: often `-100…`).
 
 ---
 
-### Part 3 — Configuration files (required)
-
-Run from the project directory (`~/smspi`):
-
-#### Step 3.1 — Create directories and copy templates
+### Part 3 — Configuration
 
 ```bash
 cd ~/smspi
 mkdir -p config data logs
 cp config.example.yaml config/config.yaml
 cp .env.example .env
+nano .env    # token + chat_id from Part 2
+nano config/config.yaml   # optional; defaults OK
 ```
 
-#### Step 3.2 — Edit secrets (`.env`)
-
-```bash
-nano .env
-```
-
-Set at minimum:
-
-```bash
-SMSPI_TELEGRAM_BOT_TOKEN=paste_token_from_part_2
-SMSPI_TELEGRAM_CHAT_ID=paste_chat_id_from_part_2
-```
-
-Save: `Ctrl+O`, Enter, `Ctrl+X`
-
-#### Step 3.3 — Optional: edit `config/config.yaml`
-
-```bash
-nano config/config.yaml
-```
-
-Defaults are fine for a first run. Set `app.timezone` if not `Europe/Berlin`.
-
-**Do not commit** `config/config.yaml` or `.env` (they are gitignored).
+| File | Git | Purpose |
+|------|-----|---------|
+| `config/config.yaml` | ignored | Main settings |
+| `.env` | ignored | Telegram secrets (recommended) |
 
 ---
 
-### Part 4A — Run with Docker (only if you chose Docker)
+### Part 4A — Docker
 
-Skip this entire section if you chose **Part 4B (venv)**.
+Skip if you use **Part 4B**.
 
-#### Step 4A.1 — Install Docker (if not already installed)
+#### 4A.1 Install Docker
 
 ```bash
 sudo apt-get update
@@ -280,72 +246,37 @@ sudo apt-get install -y docker.io docker-compose-plugin
 sudo usermod -aG docker "$USER"
 ```
 
-Log out and log back in (or `newgrp docker`) so `docker` works without sudo.
+Log out and back in, then: `docker compose version`
 
-Verify:
-
-```bash
-docker --version
-docker compose version
-```
-
-#### Step 4A.2 — Build and start smspi
+#### 4A.2 Start smspi
 
 ```bash
 cd ~/smspi
 docker compose up -d --build
-```
-
-#### Step 4A.3 — Check the container
-
-```bash
-docker compose ps
 docker compose logs -f smspi
 ```
 
-Expected in logs: `ModemManager is reachable`, `Bootstrap complete`, `All worker threads started`.  
-Stop following logs: `Ctrl+C`
+Logs should include `Bootstrap complete`. Exit logs with `Ctrl+C`.
 
-#### Step 4A.4 — Boot order after power loss (Docker)
-
-On every reboot, this order must happen:
-
-1. **ModemManager** starts (enabled in Part 1 by `setup-host.sh`)
-2. **Docker** starts
-3. **smspi container** starts (`restart: unless-stopped`)
-
-Run once to enable Docker at boot:
+#### 4A.3 Boot order
 
 ```bash
 sudo systemctl enable docker
-```
-
-Verify ModemManager is still enabled:
-
-```bash
-sudo systemctl is-enabled ModemManager
-```
-
-Expected: `enabled`
-
-```bash
-chmod +x scripts/verify-boot-order.sh
+sudo systemctl is-enabled ModemManager   # must print: enabled
 ./scripts/verify-boot-order.sh
 ```
 
-smspi inside Docker **waits up to 180 seconds** for ModemManager on startup; you do not install `smspi.service` for Docker.
+Boot sequence: **ModemManager → Docker → container** (`restart: unless-stopped`). No `smspi.service` for Docker.
 
-**Continue with [Part 5](#part-5--verify-everyone)**
+→ Continue to [Part 5](#part-5--verification).
 
 ---
 
-### Part 4B — Run with Python venv (only if you chose venv)
+### Part 4B — Python venv & systemd
 
-Skip this entire section if you chose **Part 4A (Docker)**.
+Skip if you use **Part 4A**. Complete **4B.1–4B.5** in order.
 
-Complete **all** steps 4B.1–4B.5 in order. Do not skip 4B.4–4B.5 on a Pi you want to run 24/7 (that is how smspi starts after reboot, **after** ModemManager).
-
-#### Step 4B.1 — Create virtualenv and install dependencies
+#### 4B.1 Virtual environment
 
 ```bash
 cd ~/smspi
@@ -354,7 +285,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-#### Step 4B.2 — Run smspi in the foreground (first test)
+#### 4B.2 Foreground test
 
 ```bash
 cd ~/smspi
@@ -364,79 +295,44 @@ export PYTHONPATH="$PWD/src"
 python -m smspi
 ```
 
-Expected: `ModemManager is reachable`, `Bootstrap complete`, `All worker threads started`.  
-Stop with `Ctrl+C` after you see that (systemd will run it in the background next).
+Expect `Bootstrap complete`, then `Ctrl+C`. If this fails, return to [Part 1](#part-1--host--modemmanager).
 
-If this step fails, **do not** continue — fix Part 1 (`mmcli -L`) first.
-
-#### Step 4B.3 — Install systemd service (autostart at boot)
-
-This installs `smspi.service` so that:
-
-- **ModemManager is required** (`Requires=ModemManager.service`)
-- smspi starts **after** ModemManager (`After=ModemManager.service`)
-- smspi **does not start** if ModemManager is down (`ExecStartPre` check)
+#### 4B.3 systemd service
 
 ```bash
 cd ~/smspi
 sudo bash scripts/install-systemd.sh
 ```
 
-The script will:
+Creates `/etc/systemd/system/smspi.service` with:
 
-1. Ensure ModemManager is enabled and running  
-2. Write `/etc/systemd/system/smspi.service` with **your** current directory paths  
-3. `systemctl enable smspi`  
-4. `systemctl start smspi`  
+- `Requires=ModemManager.service`
+- `After=ModemManager.service`
+- `ExecStartPre` checks ModemManager is active
 
-#### Step 4B.4 — Verify ModemManager starts before smspi
+#### 4B.4 Verify service order
 
 ```bash
-chmod +x scripts/verify-boot-order.sh
 ./scripts/verify-boot-order.sh
+sudo systemctl status ModemManager smspi
 ```
 
-Manual check:
-
-```bash
-systemctl show smspi.service -p Requires -p After --no-pager
-```
-
-Expected includes:
-
-- `Requires=ModemManager.service` (or in the Requires line)  
-- `After=... ModemManager.service ...`
-
-```bash
-sudo systemctl status ModemManager
-sudo systemctl status smspi
-```
-
-Both should be `active (running)`.
-
-#### Step 4B.5 — Reboot test (recommended)
+#### 4B.5 Reboot test
 
 ```bash
 sudo reboot
-```
-
-After the Pi is back:
-
-```bash
-systemctl is-active ModemManager
-systemctl is-active smspi
+# after login:
+systemctl is-active ModemManager smspi
 mmcli -L
 ```
 
-Expected: both `active`, `mmcli -L` lists your modem(s).
-
-**Continue with [Part 5](#part-5--verify-everyone)**
+→ Continue to [Part 5](#part-5--verification).
 
 ---
 
-### Part 5 — Verify (everyone)
+### Part 5 — Verification
 
-#### Step 5.1 — Smoke test
+#### 5.1 Smoke test
 
 ```bash
 cd ~/smspi
@@ -444,120 +340,132 @@ chmod +x scripts/smoke-test.sh
 ./scripts/smoke-test.sh
 ```
 
-Fix every `[FAIL]` before relying on production SMS.
+Resolve every `[FAIL]` line.
 
-#### Step 5.2 — End-to-end SMS test
+#### 5.2 End-to-end SMS
 
-1. From another phone, send an SMS to the SIM’s mobile number  
-2. Check Telegram for the formatted message  
-3. Check database:
+1. Send SMS to the SIM’s phone number from another handset.
+2. Confirm message in Telegram.
+3. Confirm database:
 
 ```bash
 sqlite3 ~/smspi/data/smspi.db \
   "SELECT id, sender_number, telegram_status FROM sms_messages ORDER BY id DESC LIMIT 3;"
 ```
 
-Expected: `telegram_status` = `sent`
+`telegram_status` should be `sent`.
 
-#### Step 5.3 — Logs
+#### 5.3 Logs
 
-Docker:
-
-```bash
-cd ~/smspi
-docker compose logs -f smspi
-```
-
-venv / systemd:
-
-```bash
-journalctl -u smspi -f
-# or
-tail -f ~/smspi/logs/smspi.log
-```
+| Runtime | Command |
+|---------|---------|
+| Docker | `docker compose logs -f smspi` |
+| systemd | `journalctl -u smspi -f` |
+| File | `tail -f ~/smspi/logs/smspi.log` |
 
 ---
 
 ## Configuration reference
 
-### Files
+Full template: [`config.example.yaml`](config.example.yaml).
 
-| File | Committed | Purpose |
-|------|-----------|---------|
-| `config.example.yaml` | Yes | Template — copy to `config/config.yaml` |
-| `config/config.yaml` | **No** (gitignored) | Your live settings |
-| `.env.example` | Yes | Template for secrets |
-| `.env` | **No** | Telegram token/chat_id; overrides YAML |
+### Environment variables
 
-Environment overrides for paths:
-
-| Variable | Overrides |
-|----------|-----------|
-| `SMSPI_CONFIG` | Config file path |
-| `SMSPI_DB_PATH` | SQLite path |
+| Variable | Description |
+|----------|-------------|
+| `SMSPI_CONFIG` | Path to `config.yaml` |
+| `SMSPI_DB_PATH` | SQLite file path |
 | `SMSPI_LOG_DIR` | Log directory |
-| `SMSPI_TELEGRAM_*` | Telegram credentials |
+| `SMSPI_TELEGRAM_BOT_TOKEN` | Overrides YAML `bot_token` |
+| `SMSPI_TELEGRAM_CHAT_ID` | Overrides YAML `chat_id` |
+| `SMSPI_TELEGRAM_ACCOUNT_NAME` | Label stored per message |
+| `SMSPI_LOG_LEVEL` | `INFO`, `DEBUG`, … |
 
-### Example `config/config.yaml`
+### Minimal `config/config.yaml`
 
 ```yaml
 app:
   timezone: Europe/Berlin
-  step_delay_seconds: 0.8
-  recovery_wait_seconds: 5.0
-  shutdown_grace_seconds: 15.0
 
 database:
   path: data/smspi.db
 
-logging:
-  level: INFO
-  directory: logs
-  max_bytes: 1048576
-  backup_count: 3
-
 modem:
-  poll_interval_seconds: 12
-  discovery_interval_seconds: 45
-  mmcli_timeout_seconds: 90
   delete_after_store: true
-  operator_filter: ""          # e.g. "Telekom" to ignore other operators
 
 telegram:
   enabled: true
-  account_name: primary
-  bot_token: "YOUR_BOT_TOKEN"    # prefer .env instead
-  chat_id: "YOUR_CHAT_ID"
-  send_interval_seconds: 2.0
   parse_mode: HTML
-  show_utc_in_message: false
-  failed_retry_interval_seconds: 300
-  max_message_length: 4096
+  send_interval_seconds: 2.0
 
 health:
-  interval_seconds: 300
-  modem_stale_seconds: 600
   stamp_file: data/.health_ok
 ```
 
-### Example `.env`
+Secrets belong in `.env` (see [`.env.example`](.env.example)).
 
-```bash
-SMSPI_TELEGRAM_BOT_TOKEN=123456789:AAExampleTokenFromBotFather
-SMSPI_TELEGRAM_CHAT_ID=-1001234567890
-SMSPI_TELEGRAM_ACCOUNT_NAME=primary
-SMSPI_LOG_LEVEL=INFO
-```
+### Telegram message format
 
-**Telegram message format:** HTML labels, monospace numbers, SMS body escaped. Invalid token → startup error (`getMe`). Details in Part 2.
+HTML layout: labeled fields, monospace phone numbers, escaped SMS body, UTF-16 length limit. Invalid token fails at startup (`getMe`).
 
 ---
 
-## Testing
+## Project layout & scripts
 
-Deployment verification is **[Part 5](#part-5--verify-everyone)**. Extra checks:
+```text
+smspi/
+├── config.example.yaml      # copy → config/config.yaml
+├── .env.example             # copy → .env
+├── docker-compose.yml       # Part 4A
+├── scripts/
+│   ├── setup-host.sh        # Part 1 — ModemManager
+│   ├── install-systemd.sh   # Part 4B.3
+│   ├── verify-boot-order.sh # Part 4A.3 / 4B.4
+│   ├── smoke-test.sh        # Part 5.1
+│   └── backup-db.sh
+├── src/smspi/               # application code
+├── systemd/smspi.service    # template for 4B
+└── data/ logs/              # created at runtime (gitignored)
+```
 
-### ModemManager manual
+| Script | When to run |
+|--------|-------------|
+| `setup-host.sh` | Once, Part 1 |
+| `install-systemd.sh` | Part 4B.3 (venv only) |
+| `verify-boot-order.sh` | After 4A.3 or 4B.4 |
+| `smoke-test.sh` | Part 5.1 |
+| `backup-db.sh` | Cron / manual backups |
+
+---
+
+## Day-to-day operations
+
+| Task | Command |
+|------|---------|
+| Restart (Docker) | `docker compose restart smspi` |
+| Restart (venv) | `sudo systemctl restart smspi` |
+| Backup database | `./scripts/backup-db.sh` |
+| View health history | `sqlite3 data/smspi.db "SELECT * FROM health_checks ORDER BY id DESC LIMIT 5;"` |
+| Retry failed Telegram | Automatic on boot + `failed_retry_interval_seconds` |
+
+**Cron backup example:** `0 3 * * * cd /home/pi/smspi && ./scripts/backup-db.sh`
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---------|--------------|------------|
+| `mmcli -L` empty | Stick in storage mode, MM down | `sudo systemctl restart ModemManager`; replug USB; `setup-host.sh` |
+| Not `registered` | PIN, no coverage, bad SIM | Disable PIN; check antenna; `mmcli -m 0` |
+| No SMS in smspi | Full SIM storage, poller error | `mmcli -m 0 --messaging-list-sms`; ensure `delete_after_store: true` |
+| Telegram `failed` | Bad token/chat, no internet | Fix `.env`; check `curl` to api.telegram.org |
+| Docker `unhealthy` | Health check failed | `./scripts/smoke-test.sh`; `docker compose logs smspi` |
+| D-Bus error in container | MM not on host / no dbus mount | Part 1; check `docker-compose.yml` `/run/dbus` |
+| Wrong modem after reboot | Normal index swap | IMEI mapping handles it; wait ~45 s discovery |
+| Power loss | Expected | Reboot → MM → app; WAL DB; auto retry Telegram |
+
+**Manual modem check:**
 
 ```bash
 mmcli -L
@@ -565,122 +473,28 @@ mmcli -m 0
 mmcli -m 0 --messaging-list-sms
 ```
 
-### Python unit tests (any machine, no modem)
+**Development tests (no hardware):**
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-PYTHONPATH=src python -c "
-from tests.test_telegram_format import test_escape_html, test_html_message_contains_labels, test_truncation_respects_limit
-test_escape_html(); test_html_message_contains_labels(); test_truncation_respects_limit()
-print('ok')
-"
+PYTHONPATH=src python -c "from tests.test_telegram_format import *; test_escape_html(); test_html_message_contains_labels(); print('ok')"
 ```
-
-### 5. Logs
-
-```bash
-tail -f logs/smspi.log
-# Docker:
-docker compose logs -f smspi
-```
-
----
-
-## Operations
-
-| Task | Command |
-|------|---------|
-| Backup SQLite | `./scripts/backup-db.sh` |
-| Cron backup | `0 3 * * * cd /opt/smspi && ./scripts/backup-db.sh` |
-| Re-queue failed Telegram | Automatic on boot + every `failed_retry_interval_seconds` |
-| Health history | `sqlite3 data/smspi.db "SELECT * FROM health_checks ORDER BY id DESC LIMIT 5;"` |
-
----
-
-## FAQ & troubleshooting
-
-### Power loss or unexpected shutdown
-
-- On boot, smspi waits up to **180 s** for ModemManager, runs full discovery, scans SMS, re-queues failed Telegram sends (batch limit configurable).
-- SQLite uses **WAL**; committed rows survive abrupt power-off in normal cases.
-- **Action:** follow [Part 1](#part-1--host-install-modemmanager-required) and [Part 5](#part-5--verify-everyone); Docker: `docker compose up -d` · venv: `sudo systemctl start smspi`
-
-### Reboot / USB port changed
-
-- Modems may appear as `/Modem/1` instead of `/Modem/0` — smspi maps by **IMEI** in `modem_registry`.
-- Keep each stick in the **same physical USB port** when possible; use udev rules for stability.
-- **Action:** wait for discovery cycle (~45 s) or restart service.
-
-### PIN code
-
-- ModemManager may block registration until PIN is entered.
-- **Recommended:** disable PIN on the SIM (operator app) or unlock once with `mmcli -i 0 --pin=XXXX` (index varies).
-- smspi does **not** store or manage PINs.
-
-### APN / mobile data
-
-- SMS reception usually requires **network registration**, not necessarily working mobile data.
-- Many consumer SIMs (e.g. Telekom DE) set APN automatically.
-- If `mmcli -m 0` shows not registered, fix SIM/antenna/coverage first; check operator APN docs for M2M SIMs.
-
-### No network / weak signal (2G/3G/4G)
-
-- Symptom: `state: failed` or `searching`, no SMS.
-- **Action:** antenna, better placement, powered hub, fewer concurrent modems on one bus.
-
-### `mmcli -L` empty
-
-```bash
-sudo systemctl restart ModemManager
-lsusb
-sudo usb_modeswitch -v 12d1 -p <product> -J   # if still storage mode
-```
-
-Ensure `usb_modeswitch` ≥ 2.5.2 and `HuaweiAltModeGlobal=1`.
-
-### SMS not arriving in smspi
-
-- Test with `mmcli -m N --messaging-list-sms`.
-- SIM storage full → enable `delete_after_store: true` (uses `--messaging-delete-sms`).
-- Check logs for poller errors.
-
-### Telegram `failed` status
-
-- Wrong token/chat_id, bot blocked, or no internet on the Pi.
-- Fix credentials; failed rows retry on interval and on boot.
-- Rate limit **429**: smspi waits `retry_after` from the API.
-
-### Docker container `unhealthy`
-
-- Missing `data/.health_ok` → health check failed (no modems, MM down, etc.).
-- **Action:** `./scripts/smoke-test.sh`, `docker compose logs smspi`.
-
-### D-Bus errors in container
-
-- Mount `/run/dbus`, run ModemManager on **host**, use `user: "0:0"` in Compose.
-
-### Multiple modems
-
-- Use a **powered USB hub**.
-- Increase `step_delay_seconds` / `poll_interval_seconds` if the Pi is overloaded.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. This is a **public** project — feel free to **fork**, open issues, and send pull requests on GitHub.
+Public project — forks and pull requests welcome.
 
 1. Fork [drhdev/smspi](https://github.com/drhdev/smspi)
-2. Create a branch (`git checkout -b feature/my-change`)
-3. Commit with clear messages
-4. Push and open a PR
-5. Ensure `./scripts/smoke-test.sh` passes on a Pi when touching modem integration
+2. Branch → change → PR
+3. Run `./scripts/smoke-test.sh` on a Pi for modem-related changes
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+Details: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
 ## License
 
-This project is licensed under the **GNU General Public License v3** (or later). See [LICENSE](LICENSE) and [https://www.gnu.org/licenses/gpl-3.0.html](https://www.gnu.org/licenses/gpl-3.0.html).
+Licensed under [GNU GPL v3.0 or later](LICENSE).
