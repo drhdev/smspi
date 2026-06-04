@@ -1,0 +1,16 @@
+[Unit]
+Description=smspi SMS to Telegram gateway
+After=network-online.target ModemManager.service
+Wants=ModemManager.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smspi
+Environment=SMSPI_CONFIG=/opt/smspi/config/config.yaml
+Environment=PYTHONPATH=/opt/smspi/src
+ExecStart=/opt/smspi/.venv/bin/python -m smspi
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

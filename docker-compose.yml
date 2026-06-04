@@ -1,0 +1,25 @@
+services:
+  smspi:
+    build: .
+    container_name: smspi
+    restart: unless-stopped
+    # mmcli via host D-Bus needs privileges (Polkit on Raspberry Pi OS)
+    user: "0:0"
+    environment:
+      DBUS_SYSTEM_BUS_ADDRESS: unix:path=/run/dbus/system_bus_socket
+      SMSPI_CONFIG: /app/config/config.yaml
+      SMSPI_TELEGRAM_BOT_TOKEN: ${SMSPI_TELEGRAM_BOT_TOKEN:-}
+      SMSPI_TELEGRAM_CHAT_ID: ${SMSPI_TELEGRAM_CHAT_ID:-}
+      SMSPI_TELEGRAM_ACCOUNT_NAME: ${SMSPI_TELEGRAM_ACCOUNT_NAME:-primary}
+      SMSPI_LOG_LEVEL: ${SMSPI_LOG_LEVEL:-INFO}
+    volumes:
+      - /run/dbus:/run/dbus
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    # ModemManager on the host owns USB modems; the container only uses mmcli via D-Bus.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"

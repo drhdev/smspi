@@ -1,0 +1,12 @@
+# Huawei USB modems (vendor 12d1) — helps usb_modeswitch and stable device nodes.
+# Adjust idProduct per stick model (see lsusb). Common LTE/3G products:
+#   14dc, 1506, 155e, 157d, 1f01, 1001
+
+ACTION!="add", GOTO="huawei_modem_end"
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", ATTR{idProduct}=="1f01", ATTR{bInterfaceNumber}=="*", RUN+="/usr/sbin/usb_modeswitch -v 12d1 -p 1f01 -J"
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", ATTR{idProduct}=="14dc", ATTR{bInterfaceNumber}=="*", RUN+="/usr/sbin/usb_modeswitch -v 12d1 -p 14dc -J"
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", ATTR{idProduct}=="1506", ATTR{bInterfaceNumber}=="*", RUN+="/usr/sbin/usb_modeswitch -v 12d1 -p 1506 -J"
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", ATTR{idProduct}=="155e", ATTR{bInterfaceNumber}=="*", RUN+="/usr/sbin/usb_modeswitch -v 12d1 -p 155e -J"
+
+LABEL="huawei_modem_end"

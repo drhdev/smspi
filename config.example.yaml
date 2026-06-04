@@ -1,0 +1,59 @@
+# Copy to config.yaml and adjust. In Docker, mount as /app/config/config.yaml
+
+app:
+  timezone: Europe/Berlin
+  # Pause between pipeline steps (seconds) — loose coupling, avoids races
+  step_delay_seconds: 0.8
+  # How long to wait when ModemManager / mmcli is temporarily unavailable
+  recovery_wait_seconds: 5.0
+  # Grace period for worker threads on SIGTERM/SIGINT
+  shutdown_grace_seconds: 15.0
+
+database:
+  path: data/smspi.db
+
+logging:
+  level: INFO
+  directory: logs
+  # RotatingFileHandler max size per file (bytes)
+  max_bytes: 1048576
+  backup_count: 3
+
+modem:
+  # Poll interval for new SMS on each modem
+  poll_interval_seconds: 12
+  # Re-discover modems and re-enable after boot / USB churn
+  discovery_interval_seconds: 45
+  # mmcli subprocess timeout (generous for slow Pi + weak signal)
+  mmcli_timeout_seconds: 90
+  # Delete SMS from modem storage after successful DB insert
+  delete_after_store: true
+  # Optional: only modems whose operator name contains this (empty = all)
+  operator_filter: ""
+
+telegram:
+  enabled: true
+  # Label stored in SQLite (which account received the forward)
+  account_name: primary
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+  # Delay between Telegram API calls
+  send_interval_seconds: 2.0
+  request_timeout_seconds: 60
+  max_retries: 5
+  retry_base_delay_seconds: 3.0
+  # Re-queue failed deliveries during operation (0 = only on startup)
+  failed_retry_interval_seconds: 300
+  failed_retry_batch_size: 20
+  # Telegram sendMessage limit (UTF-16 code units)
+  max_message_length: 4096
+  # HTML = bold labels + monospace numbers; empty string = plain text
+  parse_mode: HTML
+  show_utc_in_message: false
+
+health:
+  interval_seconds: 300
+  # Fail self-check if no modem seen for this many seconds (0 = disable)
+  modem_stale_seconds: 600
+  # Written when last health check passed (Docker HEALTHCHECK); default: data/.health_ok
+  stamp_file: data/.health_ok
